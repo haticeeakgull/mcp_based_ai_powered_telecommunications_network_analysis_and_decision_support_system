@@ -1,12 +1,19 @@
-﻿import os
+﻿import argparse
+import os
+from datetime import date, datetime
+from typing import Any
 
 import psycopg2
+import psycopg2.extras
+import uvicorn
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Query
 from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
 
 mcp = FastMCP("Telecom_AI_Agent")
+app = FastAPI(title="Telecom NOC API", version="1.0.0")
 
 DB_CONFIG = {
     "dbname": os.getenv("DB_NAME", "network_mcp"),
@@ -17,154 +24,385 @@ DB_CONFIG = {
 }
 
 
-def run_query(query, params=None):
-    """Run SQL safely and return fetched rows if query has output."""
+def _serialize_value(value: Any) -> Any:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
+
+
+def _serialize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    serialized = []
+    for row in rows:
+        serialized.append({k: _serialize_value(v) for k, v in row.items()})
+    return serialized
+
+
+def query_rows(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     try:
         with psycopg2.connect(**DB_CONFIG) as conn:
-            with conn.cursor() as cur:
-                cur.execute(query, params or ())
-                if cur.description:
-                    return cur.fetchall()
-                return None
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, params)
+                return list(cur.fetchall())
     except Exception as e:
-        return f"Veritabani Hatasi: {str(e)}"
+        raise RuntimeError(f"Veritabani Hatasi: {e}")
 
 
-@mcp.tool()
-def get_region_metrics(region: str):
-    """Get raw metrics for all cells in the region."""
-    sql = """
-    SELECT b.cell_id, m.latency_ms, m.rsrp_dbm
-    FROM base_stations b
-    JOIN network_metrics m ON b.cell_id = m.cell_id
-    WHERE LOWER(b.region) = LOWER(%s)
-    """
-    return run_query(sql, (region,))
+def get_metrics_service(
+    cell_id: str,
+    slice_type: str | None = None,
+    since: str | None = None,
+    limit: int = 10,
+) -> dict[str, Any]:
+    where = ["nm.cell_id = %s"]
+    params: list[Any] = [cell_id]
 
+    if slice_type:
+        where.append("nm.slice_type = %s")
+        params.append(slice_type)
 
-@mcp.tool()
-def get_region_complaints(region: str):
-    """Get complaints in the given region."""
-    sql = """
-    SELECT c.issue, c.cell_id
-    FROM complaints c
-    JOIN base_stations b ON c.cell_id = b.cell_id
-    WHERE LOWER(b.region) = LOWER(%s)
-    """
-    return run_query(sql, (region,))
+    if since:
+        where.append("nm.recorded_at >= %s")
+        params.append(since)
 
+    params.append(limit)
 
-@mcp.tool()
-def analyze_specific_cell(cell_id: str):
-    """
-    Read anomaly_results (combined algorithm) and return cell anomaly status.
-    This tool does not retrain model; it reads precomputed anomaly outputs.
-    """
-    sql_latest_anomaly = """
-    SELECT is_anomaly, anomaly_score, severity, root_cause, triggered_by, metric_recorded_at
-    FROM anomaly_results
-    WHERE cell_id = %s
-      AND algorithm = 'combined'
-    ORDER BY metric_recorded_at DESC
-    LIMIT 1
+    sql = f"""
+    SELECT nm.id, nm.cell_id, nm.slice_type, nm.latency_ms, nm.packet_loss_pct,
+           nm.throughput_mbps, nm.load_pct, nm.rsrp_dbm, nm.rsrq_db,
+           nm.connected_users, nm.recorded_at
+    FROM network_metrics nm
+    WHERE {' AND '.join(where)}
+    ORDER BY nm.recorded_at DESC
+    LIMIT %s
     """
 
-    sql_window_summary = """
-    SELECT
-        COUNT(*) AS total_count,
-        COUNT(*) FILTER (WHERE is_anomaly) AS anomaly_count,
-        AVG(anomaly_score) FILTER (WHERE is_anomaly) AS avg_anomaly_score
-    FROM anomaly_results
-    WHERE cell_id = %s
-      AND algorithm = 'combined'
-      AND metric_recorded_at >= NOW() - INTERVAL '7 days'
-    """
-
-    sql_latest_metric = """
-    SELECT latency_ms, packet_loss_pct, throughput_mbps, load_pct, recorded_at
-    FROM network_metrics
-    WHERE cell_id = %s
-    ORDER BY recorded_at DESC
-    LIMIT 1
-    """
-
-    sql_open_faults = """
-    SELECT COUNT(*)
-    FROM faults
-    WHERE cell_id = %s
-      AND resolved = FALSE
-    """
-
-    latest_anomaly = run_query(sql_latest_anomaly, (cell_id,))
-    summary = run_query(sql_window_summary, (cell_id,))
-    latest_metric = run_query(sql_latest_metric, (cell_id,))
-    open_faults = run_query(sql_open_faults, (cell_id,))
-
-    if any(isinstance(x, str) for x in [latest_anomaly, summary, latest_metric, open_faults]):
-        return {
-            "status": "UNKNOWN",
-            "cell_id": cell_id,
-            "message": "Sorgu sirasinda veritabani hatasi olustu.",
-        }
-
-    if not latest_anomaly or not summary:
-        return {
-            "status": "UNKNOWN",
-            "cell_id": cell_id,
-            "message": "Bu hucre icin anomaly_results kaydi bulunamadi.",
-        }
-
-    la = latest_anomaly[0]
-    sm = summary[0]
-    mt = latest_metric[0] if latest_metric else None
-    open_fault_count = int(open_faults[0][0]) if open_faults else 0
-
-    total_count = int(sm[0] or 0)
-    anomaly_count = int(sm[1] or 0)
-    anomaly_ratio = (anomaly_count / total_count) if total_count else 0.0
-    avg_anomaly_score = float(sm[2]) if sm[2] is not None else None
-
-    latest_is_anomaly = bool(la[0])
-    latest_score = float(la[1]) if la[1] is not None else None
-    latest_severity = la[2]
-    latest_root_cause = la[3]
-    latest_triggered_by = la[4]
-    latest_anomaly_time = la[5]
-
-    if latest_is_anomaly:
-        status = latest_severity if latest_severity else "WARNING"
-        message = f"{status}: {cell_id} icin son olcum anomali."
-    else:
-        status = "NORMAL"
-        message = f"NORMAL: {cell_id} icin son olcumde anomali yok."
-
+    rows = _serialize_rows(query_rows(sql, tuple(params)))
     return {
-        "status": status,
         "cell_id": cell_id,
-        "window_days": 7,
-        "total_count": total_count,
-        "anomaly_count": anomaly_count,
-        "anomaly_ratio": round(anomaly_ratio, 4),
-        "avg_anomaly_score": round(avg_anomaly_score, 4) if avg_anomaly_score is not None else None,
-        "latest_combined_anomaly": {
-            "is_anomaly": latest_is_anomaly,
-            "anomaly_score": round(latest_score, 4) if latest_score is not None else None,
-            "severity": latest_severity,
-            "root_cause": latest_root_cause,
-            "triggered_by": latest_triggered_by,
-            "metric_recorded_at": latest_anomaly_time.isoformat() if latest_anomaly_time else None,
-        },
-        "latest_metric": None if not mt else {
-            "latency_ms": float(mt[0]) if mt[0] is not None else None,
-            "packet_loss_pct": float(mt[1]) if mt[1] is not None else None,
-            "throughput_mbps": float(mt[2]) if mt[2] is not None else None,
-            "load_pct": float(mt[3]) if mt[3] is not None else None,
-            "recorded_at": mt[4].isoformat() if mt[4] else None,
-        },
-        "open_fault_count": open_fault_count,
-        "message": message,
+        "slice_type": slice_type,
+        "since": since,
+        "limit": limit,
+        "count": len(rows),
+        "items": rows,
     }
 
 
+def get_anomalies_service(
+    cell_id: str | None = None,
+    severity: str | None = None,
+    only_anomalies: bool = True,
+    limit: int = 50,
+) -> dict[str, Any]:
+    where = ["ar.algorithm = 'combined'"]
+    params: list[Any] = []
+
+    if only_anomalies:
+        where.append("ar.is_anomaly = TRUE")
+
+    if cell_id:
+        where.append("ar.cell_id = %s")
+        params.append(cell_id)
+
+    if severity:
+        where.append("ar.severity = %s")
+        params.append(severity)
+
+    params.append(limit)
+
+    sql = f"""
+    SELECT ar.id, ar.cell_id, ar.metric_id, ar.is_anomaly, ar.anomaly_score,
+           ar.triggered_by, ar.severity, ar.root_cause, ar.metric_recorded_at,
+           ar.detected_at
+    FROM anomaly_results ar
+    WHERE {' AND '.join(where)}
+    ORDER BY ar.metric_recorded_at DESC
+    LIMIT %s
+    """
+
+    rows = _serialize_rows(query_rows(sql, tuple(params)))
+    return {
+        "filters": {
+            "cell_id": cell_id,
+            "severity": severity,
+            "only_anomalies": only_anomalies,
+            "limit": limit,
+        },
+        "count": len(rows),
+        "items": rows,
+    }
+
+
+def get_faults_service(
+    cell_id: str | None = None,
+    region: str | None = None,
+    resolved: bool | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    where = ["1=1"]
+    params: list[Any] = []
+
+    if cell_id:
+        where.append("f.cell_id = %s")
+        params.append(cell_id)
+
+    if region:
+        where.append("LOWER(bs.region) = LOWER(%s)")
+        params.append(region)
+
+    if resolved is not None:
+        where.append("f.resolved = %s")
+        params.append(resolved)
+
+    params.append(limit)
+
+    sql = f"""
+    SELECT f.id, f.cell_id, bs.region, f.severity, f.fault_type, f.message,
+           f.resolved, f.created_at, f.resolved_at
+    FROM faults f
+    JOIN base_stations bs ON bs.cell_id = f.cell_id
+    WHERE {' AND '.join(where)}
+    ORDER BY f.created_at DESC
+    LIMIT %s
+    """
+
+    rows = _serialize_rows(query_rows(sql, tuple(params)))
+    return {
+        "filters": {
+            "cell_id": cell_id,
+            "region": region,
+            "resolved": resolved,
+            "limit": limit,
+        },
+        "count": len(rows),
+        "items": rows,
+    }
+
+
+def get_complaints_service(
+    cell_id: str | None = None,
+    region: str | None = None,
+    since: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    where = ["1=1"]
+    params: list[Any] = []
+
+    if cell_id:
+        where.append("c.cell_id = %s")
+        params.append(cell_id)
+
+    if region:
+        where.append("LOWER(c.region) = LOWER(%s)")
+        params.append(region)
+
+    if since:
+        where.append("c.created_at >= %s")
+        params.append(since)
+
+    params.append(limit)
+
+    sql = f"""
+    SELECT c.id, c.customer_id, c.region, c.issue, c.cell_id, c.created_at
+    FROM complaints c
+    WHERE {' AND '.join(where)}
+    ORDER BY c.created_at DESC
+    LIMIT %s
+    """
+
+    rows = _serialize_rows(query_rows(sql, tuple(params)))
+    return {
+        "filters": {
+            "cell_id": cell_id,
+            "region": region,
+            "since": since,
+            "limit": limit,
+        },
+        "count": len(rows),
+        "items": rows,
+    }
+
+
+def get_station_service(
+    cell_id: str | None = None,
+    region: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    where = ["1=1"]
+    params: list[Any] = []
+
+    if cell_id:
+        where.append("bs.cell_id = %s")
+        params.append(cell_id)
+
+    if region:
+        where.append("LOWER(bs.region) = LOWER(%s)")
+        params.append(region)
+
+    if status:
+        where.append("LOWER(bs.status) = LOWER(%s)")
+        params.append(status)
+
+    params.append(limit)
+
+    sql = f"""
+    SELECT bs.cell_id, bs.region, bs.lat, bs.lng, bs.status
+    FROM base_stations bs
+    WHERE {' AND '.join(where)}
+    ORDER BY bs.cell_id
+    LIMIT %s
+    """
+
+    rows = _serialize_rows(query_rows(sql, tuple(params)))
+    return {
+        "filters": {
+            "cell_id": cell_id,
+            "region": region,
+            "status": status,
+            "limit": limit,
+        },
+        "count": len(rows),
+        "items": rows,
+    }
+
+
+@mcp.tool()
+def get_metrics(cell_id: str, slice_type: str | None = None, since: str | None = None, limit: int = 10):
+    return get_metrics_service(cell_id=cell_id, slice_type=slice_type, since=since, limit=limit)
+
+
+@mcp.tool()
+def get_anomalies(
+    cell_id: str | None = None,
+    severity: str | None = None,
+    only_anomalies: bool = True,
+    limit: int = 50,
+):
+    return get_anomalies_service(
+        cell_id=cell_id,
+        severity=severity,
+        only_anomalies=only_anomalies,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+def get_faults(
+    cell_id: str | None = None,
+    region: str | None = None,
+    resolved: bool | None = None,
+    limit: int = 50,
+):
+    return get_faults_service(cell_id=cell_id, region=region, resolved=resolved, limit=limit)
+
+
+@mcp.tool()
+def get_complaints(
+    cell_id: str | None = None,
+    region: str | None = None,
+    since: str | None = None,
+    limit: int = 50,
+):
+    return get_complaints_service(cell_id=cell_id, region=region, since=since, limit=limit)
+
+
+@mcp.tool()
+def get_station(
+    cell_id: str | None = None,
+    region: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+):
+    return get_station_service(cell_id=cell_id, region=region, status=status, limit=limit)
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/metrics")
+def metrics_endpoint(
+    cell_id: str,
+    slice_type: str | None = None,
+    since: str | None = None,
+    limit: int = Query(default=10, ge=1, le=500),
+):
+    try:
+        return get_metrics_service(cell_id=cell_id, slice_type=slice_type, since=since, limit=limit)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/anomalies")
+def anomalies_endpoint(
+    cell_id: str | None = None,
+    severity: str | None = None,
+    only_anomalies: bool = True,
+    limit: int = Query(default=50, ge=1, le=1000),
+):
+    try:
+        return get_anomalies_service(
+            cell_id=cell_id,
+            severity=severity,
+            only_anomalies=only_anomalies,
+            limit=limit,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/faults")
+def faults_endpoint(
+    cell_id: str | None = None,
+    region: str | None = None,
+    resolved: bool | None = None,
+    limit: int = Query(default=50, ge=1, le=1000),
+):
+    try:
+        return get_faults_service(cell_id=cell_id, region=region, resolved=resolved, limit=limit)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/complaints")
+def complaints_endpoint(
+    cell_id: str | None = None,
+    region: str | None = None,
+    since: str | None = None,
+    limit: int = Query(default=50, ge=1, le=1000),
+):
+    try:
+        return get_complaints_service(cell_id=cell_id, region=region, since=since, limit=limit)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stations")
+def stations_endpoint(
+    cell_id: str | None = None,
+    region: str | None = None,
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=1000),
+):
+    try:
+        return get_station_service(cell_id=cell_id, region=region, status=status, limit=limit)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Telecom MCP + FastAPI runner")
+    parser.add_argument("--mode", choices=["mcp", "api"], default="mcp")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
+
+    if args.mode == "api":
+        uvicorn.run(app, host=args.host, port=args.port)
+    else:
+        mcp.run()
+
+
 if __name__ == "__main__":
-    mcp.run()
+    main()
