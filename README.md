@@ -1,52 +1,41 @@
 # MCP Based AI Powered Telecommunications Network Analysis and Decision Support System
 
-This project provides a telecom NOC-oriented architecture with:
-- synthetic data generation,
-- offline anomaly detection pipeline,
-- MCP tools for AI agents,
-- FastAPI endpoints for dashboard/backend use.
+Telekom NOC odakli bu proje su katmanlardan olusur:
+- veri uretimi (`database/`),
+- offline anomali hesaplama (`anamoly_detector.py`),
+- MCP tool katmani (`main.py`),
+- FastAPI endpoint katmani (`api.py`),
+- basit AJAX frontend (`frontend/`).
 
-## 1) Project Goal
+## 1) Mimari Ozeti
 
-The system helps answer operational questions such as:
-- Is there an anomaly in a specific cell?
-- Which region has open faults?
-- Are complaints increasing in a region?
-- What is the latest KPI state of a cell?
+- `network_metrics`, `faults`, `complaints`, `base_stations` tablolari veri kaynagidir.
+- `anamoly_detector.py` bu verilerden anomaliyi hesaplar ve `anomaly_results` tablosuna yazar.
+- MCP toollari ve API endpointleri agir modeli tekrar calistirmadan bu tablolari okur.
 
-It combines:
-- `network_metrics` (performance),
-- `anomaly_results` (precomputed anomaly output),
-- `faults`,
-- `complaints`,
-- `base_stations`.
+## 2) Dosya Yapisi
 
-## 2) Important Files
-
+- `services.py`
+  - Ortak is mantigi ve DB sorgulari
+  - MCP ve API ayni servis fonksiyonlarini kullanir
 - `main.py`
-  - Runs MCP tools (`--mode mcp`)
-  - Runs FastAPI app (`--mode api`)
+  - Sadece MCP server ve tool tanimlari
+- `api.py`
+  - Sadece FastAPI endpointleri (`/chat` dahil)
+- `frontend/`
+  - `index.html`, `style.css`, `app.js` (AJAX chat arayuzu)
 - `anamoly_detector.py`
-  - Offline anomaly pipeline (Isolation Forest + Z-Score)
-  - Writes to `anomaly_results`
-- `database/`
-  - Data generation scripts for metrics/faults/complaints
-- `.env`
-  - Local secrets and DB config (not committed)
-- `.env.example`
-  - Safe template for teammates
+  - Offline anomaly pipeline (Isolation Forest + Z-Score -> `anomaly_results`)
 
-## 3) Requirements
-
-Install dependencies:
+## 3) Kurulum
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 4) Environment Variables
+## 4) Ortam Degiskenleri
 
-Copy `.env.example` to `.env` and fill values:
+`.env.example` dosyasini `.env` olarak kopyalayip doldurun:
 
 ```env
 DB_HOST=localhost
@@ -56,29 +45,42 @@ DB_USER=postgres
 DB_PASSWORD=your_password
 ```
 
-## 5) Run Modes
+## 5) Calistirma
 
-### A) MCP mode (for MCP Inspector / LLM agent calls)
-
-```bash
-python main.py --mode mcp
-```
-
-### B) API mode (for REST testing / integration)
+### A) MCP Server
 
 ```bash
-python main.py --mode api --host 127.0.0.1 --port 8000
+python main.py
 ```
 
-Swagger docs:
+Inspector ile test:
 
-```text
-http://127.0.0.1:8000/docs
+```bash
+npx @modelcontextprotocol/inspector python main.py
 ```
 
-## 6) MCP Tools
+### B) FastAPI Server
 
-Current tool set:
+```bash
+uvicorn api:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Kontrol:
+- Root: `http://127.0.0.1:8000/`
+- Health: `http://127.0.0.1:8000/health`
+- Docs: `http://127.0.0.1:8000/docs`
+
+### C) Frontend (AJAX)
+
+```bash
+cd frontend
+python -m http.server 5500
+```
+
+Tarayici:
+- `http://127.0.0.1:5500`
+
+## 6) MCP Toollari
 
 1. `get_metrics(cell_id, slice_type=None, since=None, limit=10)`
 2. `get_anomalies(cell_id=None, severity=None, only_anomalies=True, limit=50)`
@@ -86,64 +88,52 @@ Current tool set:
 4. `get_complaints(cell_id=None, region=None, since=None, limit=50)`
 5. `get_station(cell_id=None, region=None, status=None, limit=50)`
 
-## 7) FastAPI Endpoints
+## 7) FastAPI Endpointleri
 
+- `GET /`
 - `GET /health`
 - `GET /metrics`
 - `GET /anomalies`
 - `GET /faults`
 - `GET /complaints`
 - `GET /stations`
+- `POST /chat`
 
-## 8) Data + Anomaly Pipeline Flow
+### `/chat` ornek request
 
-Recommended demo workflow:
+```json
+{
+  "message": "CELL_017 icin anomali var mi?",
+  "limit": 20
+}
+```
 
-1. Generate/load seed data into PostgreSQL (`network_metrics`, `faults`, `complaints`, `base_stations`).
-2. Run anomaly pipeline once:
+## 8) Demo Akisi (Onerilen)
+
+1. Seed verilerini yukle (`database/` scriptleri).
+2. Bir kez anomali hesapla:
 
 ```bash
 python anamoly_detector.py --mode full
 ```
 
-3. Start MCP:
+3. API ve/veya MCP'yi baslat.
+4. Su tip sorularla demo yap:
+- `CELL_017 icin anomali var mi?`
+- `Buca bolgesinde acik fault var mi?`
+- `Konak bolgesinde sikayet var mi?`
 
-```bash
-python main.py --mode mcp
-```
+## 9) Guvenlik Notlari
 
-4. Test tools in MCP Inspector.
+- Gercek sifreleri kodda tutmayin.
+- `.env` dosyasini repoya eklemeyin (`.gitignore`).
+- Sifre sizdigi durumlarda credential rotation uygulayin.
 
-## 9) Demo Queries (Quick Start)
+## 10) Sorun Giderme
 
-Examples:
-
-- Metrics (normal check):
-  - `cell_id=CELL_017`, `limit=10`
-- Anomalies (cell):
-  - `cell_id=CELL_017`, `only_anomalies=true`
-- Faults (region open faults):
-  - `region=Buca`, `resolved=false`
-- Complaints (region):
-  - `region=Konak`, `limit=30`
-- Station:
-  - `cell_id=CELL_017`
-
-## 10) Security Notes
-
-- Never commit real secrets.
-- Keep `.env` in `.gitignore`.
-- Use credential rotation if any secret is exposed.
-
-## 11) Troubleshooting
-
-- `ModuleNotFoundError`: run `pip install -r requirements.txt`
-- Empty responses from tools:
-  - verify table data exists,
-  - verify region/cell names,
-  - verify anomaly pipeline was executed (`anomaly_results` populated).
-
-## 12) Team Notes
-
-- Offline detection (`anamoly_detector.py`) and online tool serving (`main.py`) are intentionally separated.
-- MCP tools should read prepared analysis outputs (`anomaly_results`) instead of retraining model on every call.
+- `ModuleNotFoundError`: `pip install -r requirements.txt`
+- `{"detail":"Not Found"}`:
+  - dogru endpoint kullandiginizi kontrol edin (`/`, `/health`, `/docs`)
+- Bos sonuc:
+  - tabloda veri oldugunu ve filtrelerin dogru oldugunu kontrol edin
+  - `anomaly_results` icin `anamoly_detector.py` calistirilmis olmali

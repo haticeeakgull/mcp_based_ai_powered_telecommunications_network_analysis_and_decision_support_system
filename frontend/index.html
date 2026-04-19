@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Telecom NOC Chat</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>Telecom NOC Assistant</h1>
+    <p class="hint">Ornek: <code>CELL_017 icin anomali var mi?</code></p>
+
+    <section id="chatBox" class="chat-box"></section>
+
+    <form id="chatForm" class="chat-form">
+      <input id="messageInput" type="text" placeholder="Sorunu yaz..." required />
+      <input id="limitInput" type="number" min="1" max="200" value="20" />
+      <button type="submit">Gonder</button>
+    </form>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>
