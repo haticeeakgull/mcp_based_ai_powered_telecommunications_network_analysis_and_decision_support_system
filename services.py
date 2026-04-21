@@ -18,11 +18,36 @@ DB_CONFIG = {
 }
 
 KNOWN_REGIONS = [
-    "Bornova", "Konak", "Karsiyaka", "Buca", "Cigli", "Bayrakli", "Gaziemir",
-    "Menemen", "Torbali", "Kemalpasa", "Karabaglar", "Urla", "Balcova",
-    "Narlidere", "Guzelbahce", "Seferihisar", "Menderes", "Aliaga", "Cesme",
-    "Selcuk", "Foca", "Karaburun", "Tire", "Odemis", "Kiraz", "Beydag",
-    "Kinik", "Dikili", "Bergama", "Bayindir",
+    "Bornova",
+    "Konak",
+    "Karsiyaka",
+    "Buca",
+    "Cigli",
+    "Bayrakli",
+    "Gaziemir",
+    "Menemen",
+    "Torbali",
+    "Kemalpasa",
+    "Karabaglar",
+    "Urla",
+    "Balcova",
+    "Narlidere",
+    "Guzelbahce",
+    "Seferihisar",
+    "Menderes",
+    "Aliaga",
+    "Cesme",
+    "Selcuk",
+    "Foca",
+    "Karaburun",
+    "Tire",
+    "Odemis",
+    "Kiraz",
+    "Beydag",
+    "Kinik",
+    "Dikili",
+    "Bergama",
+    "Bayindir",
 ]
 
 
@@ -71,11 +96,19 @@ def get_metrics_service(
     LIMIT %s
     """
     rows = _serialize_rows(query_rows(sql, tuple(params)))
-    return {"cell_id": cell_id, "slice_type": slice_type, "since": since, "limit": limit, "count": len(rows), "items": rows}
+    return {
+        "cell_id": cell_id,
+        "slice_type": slice_type,
+        "since": since,
+        "limit": limit,
+        "count": len(rows),
+        "items": rows,
+    }
 
 
 def get_anomalies_service(
     cell_id: str | None = None,
+    region: str | None = None,
     severity: str | None = None,
     only_anomalies: bool = True,
     limit: int = 50,
@@ -87,6 +120,9 @@ def get_anomalies_service(
     if cell_id:
         where.append("ar.cell_id = %s")
         params.append(cell_id)
+    if region:
+        where.append("LOWER(bs.region) = LOWER(%s)")
+        params.append(region)
     if severity:
         where.append("ar.severity = %s")
         params.append(severity)
@@ -94,15 +130,22 @@ def get_anomalies_service(
     sql = f"""
     SELECT ar.id, ar.cell_id, ar.metric_id, ar.is_anomaly, ar.anomaly_score,
            ar.triggered_by, ar.severity, ar.root_cause, ar.metric_recorded_at,
-           ar.detected_at
+           ar.detected_at, bs.region
     FROM anomaly_results ar
+    JOIN base_stations bs ON bs.cell_id = ar.cell_id
     WHERE {' AND '.join(where)}
     ORDER BY ar.metric_recorded_at DESC
     LIMIT %s
     """
     rows = _serialize_rows(query_rows(sql, tuple(params)))
     return {
-        "filters": {"cell_id": cell_id, "severity": severity, "only_anomalies": only_anomalies, "limit": limit},
+        "filters": {
+            "cell_id": cell_id,
+            "region": region,
+            "severity": severity,
+            "only_anomalies": only_anomalies,
+            "limit": limit,
+        },
         "count": len(rows),
         "items": rows,
     }
@@ -113,6 +156,7 @@ def get_faults_service(
     region: str | None = None,
     resolved: bool | None = None,
     limit: int = 50,
+    group_by_region: bool = False,
 ) -> dict[str, Any]:
     where = ["1=1"]
     params: list[Any] = []
@@ -125,6 +169,29 @@ def get_faults_service(
     if resolved is not None:
         where.append("f.resolved = %s")
         params.append(resolved)
+
+    if group_by_region:
+        sql = f"""
+        SELECT bs.region, COUNT(*) as fault_count,
+               SUM(CASE WHEN f.severity='CRITICAL' THEN 1 ELSE 0 END) as critical,
+               SUM(CASE WHEN f.severity='MAJOR' THEN 1 ELSE 0 END) as major,
+               SUM(CASE WHEN f.severity='MINOR' THEN 1 ELSE 0 END) as minor
+        FROM faults f
+        JOIN base_stations bs ON bs.cell_id = f.cell_id
+        WHERE {' AND '.join(where)}
+        GROUP BY bs.region
+        ORDER BY fault_count DESC
+        LIMIT %s
+        """
+        params.append(limit)
+        rows = _serialize_rows(query_rows(sql, tuple(params)))
+        return {
+            "filters": {"group_by": "region", "resolved": resolved, "limit": limit},
+            "count": len(rows),
+            "grouped": True,
+            "items": rows,
+        }
+
     params.append(limit)
     sql = f"""
     SELECT f.id, f.cell_id, bs.region, f.severity, f.fault_type, f.message,
@@ -137,8 +204,14 @@ def get_faults_service(
     """
     rows = _serialize_rows(query_rows(sql, tuple(params)))
     return {
-        "filters": {"cell_id": cell_id, "region": region, "resolved": resolved, "limit": limit},
+        "filters": {
+            "cell_id": cell_id,
+            "region": region,
+            "resolved": resolved,
+            "limit": limit,
+        },
         "count": len(rows),
+        "grouped": False,
         "items": rows,
     }
 
@@ -148,6 +221,7 @@ def get_complaints_service(
     region: str | None = None,
     since: str | None = None,
     limit: int = 50,
+    group_by_issue: bool = False,
 ) -> dict[str, Any]:
     where = ["1=1"]
     params: list[Any] = []
@@ -160,6 +234,27 @@ def get_complaints_service(
     if since:
         where.append("c.created_at >= %s")
         params.append(since)
+
+    if group_by_issue:
+        sql = f"""
+        SELECT c.issue, COUNT(*) as complaint_count,
+               MIN(c.created_at) as first_seen,
+               MAX(c.created_at) as last_seen
+        FROM complaints c
+        WHERE {' AND '.join(where)}
+        GROUP BY c.issue
+        ORDER BY complaint_count DESC
+        LIMIT %s
+        """
+        params.append(limit)
+        rows = _serialize_rows(query_rows(sql, tuple(params)))
+        return {
+            "filters": {"cell_id": cell_id, "region": region, "limit": limit},
+            "count": len(rows),
+            "grouped": True,
+            "items": rows,
+        }
+
     params.append(limit)
     sql = f"""
     SELECT c.id, c.customer_id, c.region, c.issue, c.cell_id, c.created_at
@@ -170,8 +265,14 @@ def get_complaints_service(
     """
     rows = _serialize_rows(query_rows(sql, tuple(params)))
     return {
-        "filters": {"cell_id": cell_id, "region": region, "since": since, "limit": limit},
+        "filters": {
+            "cell_id": cell_id,
+            "region": region,
+            "since": since,
+            "limit": limit,
+        },
         "count": len(rows),
+        "grouped": False,
         "items": rows,
     }
 
@@ -203,15 +304,29 @@ def get_station_service(
     """
     rows = _serialize_rows(query_rows(sql, tuple(params)))
     return {
-        "filters": {"cell_id": cell_id, "region": region, "status": status, "limit": limit},
+        "filters": {
+            "cell_id": cell_id,
+            "region": region,
+            "status": status,
+            "limit": limit,
+        },
         "count": len(rows),
         "items": rows,
     }
 
 
 def extract_cell_id(text: str) -> str | None:
-    match = re.search(r"(CELL_\d{3})", text, flags=re.IGNORECASE)
-    return match.group(1).upper() if match else None
+    # cell_18, CELL_18, Cell_18, CELL_018 gibi formatları yakala
+    match = re.search(r"\b(cell[_\s]?\d{1,3})\b", text, flags=re.IGNORECASE)
+    if match:
+        # Normalize et: CELL_XXX formatına çevir (3 haneli)
+        raw = match.group(1).upper().replace(" ", "_")
+        # Sayıyı çıkar
+        num_match = re.search(r"\d+", raw)
+        if num_match:
+            num = int(num_match.group())
+            return f"CELL_{num:03d}"  # 3 haneli format: CELL_018
+    return None
 
 
 def extract_region(text: str) -> str | None:
@@ -222,16 +337,140 @@ def extract_region(text: str) -> str | None:
     return None
 
 
+def extract_metric_type(text: str) -> str | None:
+    """Kullanıcının sorduğu spesifik metrik tipini tespit eder"""
+    m = text.lower()
+
+    # Packet loss
+    if any(k in m for k in ["packet loss", "paket kayb", "paket kayıp"]):
+        return "packet_loss"
+
+    # Latency / Gecikme
+    if any(k in m for k in ["latency", "gecikme", "ping", "delay"]):
+        return "latency"
+
+    # Sinyal gücü
+    if any(
+        k in m for k in ["sinyal", "signal", "rsrp", "rsrq", "güç", "guc", "kalite"]
+    ):
+        return "signal"
+
+    # Yük / Load
+    if any(k in m for k in ["yük", "yuk", "load", "kapasite", "doluluk"]):
+        return "load"
+
+    # Throughput / Hız
+    if any(k in m for k in ["throughput", "hız", "hiz", "mbps", "bandwidth", "bant"]):
+        return "throughput"
+
+    return None
+
+
+def is_group_by_region_query(text: str) -> bool:
+    """'Hangi bölgede en çok X var' gibi gruplama sorgusu mu?"""
+    m = text.lower()
+    return any(
+        k in m
+        for k in [
+            "hangi bölge",
+            "hangi bolge",
+            "bölge bazlı",
+            "bolge bazli",
+            "en çok",
+            "en cok",
+            "en fazla",
+            "sıralama",
+            "siralama",
+            "karşılaştır",
+            "karsilastir",
+            "dağılım",
+            "dagilim",
+        ]
+    )
+
+
+def is_group_by_issue_query(text: str) -> bool:
+    """'Ne tür sorunlardan kaynaklanıyor' gibi issue gruplama sorgusu mu?"""
+    m = text.lower()
+    return any(
+        k in m
+        for k in [
+            "ne tür",
+            "ne tur",
+            "kaynaklan",
+            "neden",
+            "sebep",
+            "tür",
+            "tur",
+            "çeşit",
+            "cesit",
+            "kategori",
+        ]
+    )
+
+
 def route_chat(message: str) -> str:
     m = message.lower()
-    if any(k in m for k in ["anomali", "anomaly", "severity", "root cause"]):
-        return "anomalies"
-    if any(k in m for k in ["fault", "ariza", "alarm"]):
-        return "faults"
-    if any(k in m for k in ["sikayet", "complaint", "musteri"]):
+
+    # Şikayet anahtar kelimeleri — anomaliden ÖNCE kontrol et
+    if any(
+        k in m
+        for k in [
+            "şikayet",
+            "sikayet",
+            "şikayetler",
+            "sikayetler",
+            "complaint",
+            "musteri",
+            "müşteri",
+            "kullanici",
+            "kullanıcı",
+            "kaynaklan",
+            "neden",
+            "ne tür sorun",
+            "ne tur sorun",
+        ]
+    ):
         return "complaints"
-    if any(k in m for k in ["station", "istasyon", "status", "offline", "online"]):
+
+    # Arıza/fault anahtar kelimeleri
+    if any(k in m for k in ["fault", "ariza", "arıza", "alarm", "kesinti"]):
+        return "faults"
+
+    # Anomali ile ilgili anahtar kelimeler
+    if any(
+        k in m
+        for k in [
+            "anomali",
+            "anomaly",
+            "severity",
+            "root cause",
+            "arttı",
+            "artti",
+            "düştü",
+            "dustu",
+            "yükseldi",
+            "azaldı",
+            "azaldi",
+            "packet loss",
+            "paket kayb",
+            "gecikme",
+            "latency",
+            "sinyal",
+            "sorun",
+            "problem",
+            "hata",
+        ]
+    ):
+        return "anomalies"
+
+    # İstasyon durumu anahtar kelimeleri
+    if any(
+        k in m for k in ["station", "istasyon", "status", "offline", "online", "durum"]
+    ):
         return "stations"
+
+    # Varsayılan: metrik sorgusu
     return "metrics"
 
 

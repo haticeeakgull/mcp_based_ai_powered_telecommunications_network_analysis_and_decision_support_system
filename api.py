@@ -7,7 +7,10 @@ from pydantic import BaseModel
 from services import (
     build_answer,
     extract_cell_id,
+    extract_metric_type,
     extract_region,
+    is_group_by_region_query,
+    is_group_by_issue_query,
     get_anomalies_service,
     get_complaints_service,
     get_faults_service,
@@ -36,6 +39,7 @@ class ChatResponse(BaseModel):
     parsed: dict[str, Any]
     data: dict[str, Any]
     answer: str
+    metric_type: str | None = None  # Yeni alan
 
 
 @app.get("/health")
@@ -56,7 +60,9 @@ def metrics_endpoint(
     limit: int = Query(default=10, ge=1, le=500),
 ):
     try:
-        return get_metrics_service(cell_id=cell_id, slice_type=slice_type, since=since, limit=limit)
+        return get_metrics_service(
+            cell_id=cell_id, slice_type=slice_type, since=since, limit=limit
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -64,6 +70,7 @@ def metrics_endpoint(
 @app.get("/anomalies")
 def anomalies_endpoint(
     cell_id: str | None = None,
+    region: str | None = None,
     severity: str | None = None,
     only_anomalies: bool = True,
     limit: int = Query(default=50, ge=1, le=1000),
@@ -71,6 +78,7 @@ def anomalies_endpoint(
     try:
         return get_anomalies_service(
             cell_id=cell_id,
+            region=region,
             severity=severity,
             only_anomalies=only_anomalies,
             limit=limit,
@@ -87,7 +95,9 @@ def faults_endpoint(
     limit: int = Query(default=50, ge=1, le=1000),
 ):
     try:
-        return get_faults_service(cell_id=cell_id, region=region, resolved=resolved, limit=limit)
+        return get_faults_service(
+            cell_id=cell_id, region=region, resolved=resolved, limit=limit
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -100,7 +110,9 @@ def complaints_endpoint(
     limit: int = Query(default=50, ge=1, le=1000),
 ):
     try:
-        return get_complaints_service(cell_id=cell_id, region=region, since=since, limit=limit)
+        return get_complaints_service(
+            cell_id=cell_id, region=region, since=since, limit=limit
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -113,7 +125,9 @@ def stations_endpoint(
     limit: int = Query(default=50, ge=1, le=1000),
 ):
     try:
-        return get_station_service(cell_id=cell_id, region=region, status=status, limit=limit)
+        return get_station_service(
+            cell_id=cell_id, region=region, status=status, limit=limit
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -127,26 +141,58 @@ def chat_endpoint(payload: ChatRequest):
     route = route_chat(msg)
     cell_id = extract_cell_id(msg)
     region = extract_region(msg)
-    parsed = {"cell_id": cell_id, "region": region, "limit": payload.limit}
+    metric_type = extract_metric_type(msg)
+    group_by_region = is_group_by_region_query(msg)
+    group_by_issue = is_group_by_issue_query(msg)
+    parsed = {
+        "cell_id": cell_id,
+        "region": region,
+        "limit": payload.limit,
+        "metric_type": metric_type,
+        "group_by_region": group_by_region,
+        "group_by_issue": group_by_issue,
+    }
 
     try:
         if route == "metrics":
             if not cell_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Metrik sorgusu icin mesajda CELL_XXX belirtin.",
-                )
-            data = get_metrics_service(cell_id=cell_id, limit=payload.limit)
+                if region:
+                    data = get_station_service(region=region, limit=payload.limit)
+                    route = "stations"
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Metrik sorgusu için mesajda CELL_XXX (örn: CELL_018 veya cell_18) belirtin.",
+                    )
+            else:
+                data = get_metrics_service(cell_id=cell_id, limit=payload.limit)
         elif route == "anomalies":
-            data = get_anomalies_service(cell_id=cell_id, only_anomalies=True, limit=payload.limit)
+            data = get_anomalies_service(
+                cell_id=cell_id, region=region, only_anomalies=True, limit=payload.limit
+            )
         elif route == "faults":
-            data = get_faults_service(cell_id=cell_id, region=region, resolved=False, limit=payload.limit)
+            data = get_faults_service(
+                cell_id=cell_id,
+                region=region,
+                resolved=False,
+                limit=payload.limit,
+                group_by_region=group_by_region,
+            )
         elif route == "complaints":
-            data = get_complaints_service(cell_id=cell_id, region=region, limit=payload.limit)
+            data = get_complaints_service(
+                cell_id=cell_id,
+                region=region,
+                limit=payload.limit,
+                group_by_issue=group_by_issue,
+            )
         else:
-            data = get_station_service(cell_id=cell_id, region=region, limit=payload.limit)
+            data = get_station_service(
+                cell_id=cell_id, region=region, limit=payload.limit
+            )
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     answer = build_answer(route, parsed, data)
-    return ChatResponse(route=route, parsed=parsed, data=data, answer=answer)
+    return ChatResponse(
+        route=route, parsed=parsed, data=data, answer=answer, metric_type=metric_type
+    )
