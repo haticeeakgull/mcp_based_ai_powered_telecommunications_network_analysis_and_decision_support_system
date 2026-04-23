@@ -296,6 +296,36 @@ function formatStationCard(item) {
   return card;
 }
 
+// ── Bölgeye Göre İstasyon Grupları ───────────────────────────
+function formatStationsByRegion(byRegion, status) {
+  const statusColor = status === "active" ? "#10b981" : status === "offline" ? "#f87171" : "#f59e0b";
+  const statusLabel = status === "active" ? "✅ Aktif" : status === "offline" ? "🔴 Çevrimdışı" : "🔧 Bakımda";
+
+  const container = document.createElement("div");
+  container.className = "station-region-list";
+
+  const entries = Object.entries(byRegion).sort((a, b) => b[1].length - a[1].length);
+
+  entries.forEach(([region, stations]) => {
+    const block = document.createElement("div");
+    block.className = "station-region-block";
+    block.innerHTML = `
+      <div class="station-region-header">
+        <span class="station-region-name">📍 ${region}</span>
+        <span class="station-region-badge" style="background:${statusColor}20; border:1px solid ${statusColor}; color:${statusColor}">
+          ${statusLabel} · ${stations.length} istasyon
+        </span>
+      </div>
+      <div class="station-chips">
+        ${stations.map(s => `<span class="station-chip">${s.cell_id}</span>`).join("")}
+      </div>
+    `;
+    container.appendChild(block);
+  });
+
+  return container;
+}
+
 // Metrik tipi → hangi DB alanı
 const METRIC_FIELD_MAP = {
   "packet_loss": "packet_loss_pct",
@@ -434,7 +464,14 @@ function renderResponse(data, route, metricType = null) {
     summaryText = `${count} şikayet kaydı bulundu`;
   } else if (route === "stations") {
     summaryIcon = "🗼";
-    summaryText = `${count} istasyon kaydı bulundu`;
+    const statusLabel = {
+      "active": "aktif", "offline": "çevrimdışı", "maintenance": "bakımda"
+    };
+    const sf = data.filters?.status;
+    summaryText = sf
+      ? `${count} ${statusLabel[sf.toLowerCase()] || sf} istasyon bulundu`
+      : `${count} istasyon kaydı bulundu`;
+    if (data.filters?.region) summaryText += ` (${data.filters.region})`;
   } else {
     summaryText = `${count} metrik kaydı bulundu`;
     if (metricType) {
@@ -505,10 +542,22 @@ function renderResponse(data, route, metricType = null) {
     }
 
   } else {
-    const grid = document.createElement("div");
-    grid.className = "anomaly-grid";
-    items.forEach((item) => grid.appendChild(formatStationCard(item)));
-    container.appendChild(grid);
+    // Stations — bölge bazlı gruplama varsa grupla, yoksa kart listesi
+    if (data.filters?.status && !data.filters?.region) {
+      // Bölgeye göre grupla (hangi bölgede offline gibi sorgular)
+      const byRegion = {};
+      items.forEach(item => {
+        const r = item.region || "Bilinmiyor";
+        if (!byRegion[r]) byRegion[r] = [];
+        byRegion[r].push(item);
+      });
+      container.appendChild(formatStationsByRegion(byRegion, data.filters.status));
+    } else {
+      const grid = document.createElement("div");
+      grid.className = "anomaly-grid";
+      items.forEach((item) => grid.appendChild(formatStationCard(item)));
+      container.appendChild(grid);
+    }
   }
 
   return container;

@@ -9,6 +9,7 @@ from services import (
     extract_cell_id,
     extract_metric_type,
     extract_region,
+    extract_station_status,
     is_group_by_region_query,
     is_group_by_issue_query,
     get_anomalies_service,
@@ -142,6 +143,7 @@ def chat_endpoint(payload: ChatRequest):
     cell_id = extract_cell_id(msg)
     region = extract_region(msg)
     metric_type = extract_metric_type(msg)
+    station_status = extract_station_status(msg)
     group_by_region = is_group_by_region_query(msg)
     group_by_issue = is_group_by_issue_query(msg)
     parsed = {
@@ -149,6 +151,7 @@ def chat_endpoint(payload: ChatRequest):
         "region": region,
         "limit": payload.limit,
         "metric_type": metric_type,
+        "station_status": station_status,
         "group_by_region": group_by_region,
         "group_by_issue": group_by_issue,
     }
@@ -187,7 +190,10 @@ def chat_endpoint(payload: ChatRequest):
             )
         else:
             data = get_station_service(
-                cell_id=cell_id, region=region, limit=payload.limit
+                cell_id=cell_id,
+                region=region,
+                status=station_status,
+                limit=payload.limit,
             )
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))

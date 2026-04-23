@@ -136,5 +136,20 @@ def analyze_specific_cell(cell_id: str):
     }
 
 
+@mcp.tool()
+def get_station_status(status: str):
+    """Belirli bir durumdaki (aktif, inaktif, bakımda) istasyonları listeler."""
+    valid_statuses = ["active", "inactive", "maintenance"]
+    if status not in valid_statuses:
+        return {"error": f"Geçersiz durum: {status}. Geçerli durumlar: {', '.join(valid_statuses)}"}
+
+    sql = """
+    SELECT cell_id, region, status
+    FROM base_stations
+    WHERE status = %s
+    """
+    return run_query(sql, (status,))
+
+
 if __name__ == "__main__":
     mcp.run()

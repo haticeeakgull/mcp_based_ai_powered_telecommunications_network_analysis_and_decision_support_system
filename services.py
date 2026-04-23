@@ -319,13 +319,37 @@ def extract_cell_id(text: str) -> str | None:
     # cell_18, CELL_18, Cell_18, CELL_018 gibi formatları yakala
     match = re.search(r"\b(cell[_\s]?\d{1,3})\b", text, flags=re.IGNORECASE)
     if match:
-        # Normalize et: CELL_XXX formatına çevir (3 haneli)
         raw = match.group(1).upper().replace(" ", "_")
-        # Sayıyı çıkar
         num_match = re.search(r"\d+", raw)
         if num_match:
             num = int(num_match.group())
-            return f"CELL_{num:03d}"  # 3 haneli format: CELL_018
+            return f"CELL_{num:03d}"
+    return None
+
+
+def extract_station_status(text: str) -> str | None:
+    """Kullanıcının sorduğu istasyon durumunu tespit eder."""
+    m = text.lower()
+    if any(
+        k in m
+        for k in [
+            "offline",
+            "çevrimdışı",
+            "cevrimdisi",
+            "kapalı",
+            "kapali",
+            "inactive",
+            "inaktif",
+        ]
+    ):
+        return "offline"
+    if any(k in m for k in ["maintenance", "bakım", "bakim", "servis"]):
+        return "maintenance"
+    if any(
+        k in m
+        for k in ["online", "aktif", "active", "açık", "acik", "çalışıyor", "calisiyor"]
+    ):
+        return "active"
     return None
 
 

@@ -661,3 +661,56 @@ button:active {
   color: #475569;
   margin-top: 6px;
 }
+
+/* ── Bölgeye Göre İstasyon Grupları ─────────────────────── */
+.station-region-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.station-region-block {
+  background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+  border-radius: 12px;
+  padding: 14px 16px;
+  border-left: 4px solid #3b82f6;
+}
+
+.station-region-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.station-region-name {
+  font-weight: 600;
+  font-size: 1rem;
+  color: #e2e8f0;
+}
+
+.station-region-badge {
+  padding: 4px 10px;
+  border-radius: 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.station-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.station-chip {
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  color: #93c5fd;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
